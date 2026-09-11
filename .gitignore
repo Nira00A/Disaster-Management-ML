@@ -1,0 +1,45 @@
+# Environment & secrets
+.env/data/
+
+# Satellite image data (large binary files — store separately)
+**/sat_data/
+src/notebooks/data/
+
+# Large raster / GIS files (exceed GitHub's 100MB limit — use Git LFS or cloud storage)
+*.tif
+*.tiff
+*.geotiff
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.egg
+*.egg-info/
+dist/
+build/
+*.so
+.eggs/
+
+# Virtual environments
+venv/
+.venv/
+env/
+ENV/
+
+# Jupyter Notebooks
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Model binaries (optional — uncomment if you don't want to push .pkl files)
+# models/*.pkl
