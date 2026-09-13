@@ -1,8 +1,8 @@
 import requests
 import pandas as pd
-from datetime import datetime, timedelta
 
-def get_topology(lat: float, lon: float, target_date: str) -> float:
+## Feting Topology data of the given Latitude and Longitude
+def get_topology(lat: float, lon: float, target_date: str) -> dict:
     """
     Get elevation for a given latitude and longitude.
     
@@ -72,7 +72,13 @@ def get_topology(lat: float, lon: float, target_date: str) -> float:
 
     except Exception as e:
         print(e)
-        return None
+        return {
+            "soil_moisture_0_7cm_avg": 0.0,
+            "soil_moisture_7_28cm_avg": 0.0,
+            "daily_rainfall_mm": 0.0,
+            "cumulative_rainfall_3d_mm": 0.0,
+            "cumulative_rainfall_7d_mm": 0.0,
+        }
 
 if __name__ == "__main__":
     lat = 28.6139

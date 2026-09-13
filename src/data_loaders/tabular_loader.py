@@ -17,7 +17,11 @@ DATA_DIR = os.path.abspath(os.path.join(CURRENT_DIR, "..", "..", "data", "final_
 
 ## Loading the dataset of the Landslides Containing feilds like - id , latitude , longitude , geometry .....
 def load_landlisde_tabular_data(
-    data_dir: str = DATA_DIR):
+    data_dir: str):
+
+    # Fallback directory
+    if data_dir is None:
+        data_dir = DATA_DIR
 
     # Load dataset
     df = pd.read_csv(data_dir)

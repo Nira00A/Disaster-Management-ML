@@ -1,5 +1,7 @@
 # Environment & secrets
 .env/data/
+data
+data/*
 
 # Satellite image data (large binary files — store separately)
 **/sat_data/

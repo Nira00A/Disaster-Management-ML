@@ -10,7 +10,7 @@ from sklearn.decomposition import PCA
 from tensorflow.keras.applications.resnet50 import ResNet50, preprocess_input
 
 ## Base Model for Encoding
-def encoding():
+def encoding(dataDir: str):
     """
     This function encodes the satellite images using ResNet50 model and returns the image 
     embeddings.
@@ -24,7 +24,7 @@ def encoding():
     base_model.trainable = False
 
     ## Loading Satellite Images
-    img_dataset = image_loader()
+    img_dataset = image_loader(dataDir)
 
     img_dataset = img_dataset.map(lambda x: preprocess_input(x))
 

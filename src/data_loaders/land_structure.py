@@ -11,7 +11,10 @@ import numpy as np
 import rasterio
 from rasterio.windows import Window
 
-def get_terrain_features(lat: float, lon: float, dem_path: str) -> dict:
+def get_terrain_features(lat: float, lon: float, dem_path: str = DATA_DIR) -> dict:
+    '''
+        The terrain features are extracted from the Digital Elevation Model (DEM).
+    '''
     with rasterio.open(dem_path) as src:
         row, col = src.index(lon, lat)
         
