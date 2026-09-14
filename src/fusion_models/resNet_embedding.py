@@ -69,17 +69,12 @@ def preprocess_combined_data(combined_data, target_variable: str):
     # Split the data into training and testing sets
     X_train, X_test, y_train, y_test = splitting_data(combined_data, target_variable)
 
-    # Scale the features
-    columns_to_scale = X_train.columns.tolist()  # Assuming all columns need to be scaled
-    X_train_scaled, X_test_scaled = scale_data(X_train, X_test, columns_to_scale)
-
-    return X_train_scaled, X_test_scaled, y_train, y_test
+    return X_train, X_test, y_train, y_test
 
 if __name__ == "__main__":
     img_embeddings = encoding()
     combined_data = join_embeddings_with_tabular_data(img_embeddings, load_landlisde_tabular_data())
-    preprocessed_data = preprocess_combined_data(combined_data, target_variable="label")
-    X_train_scaled, X_test_scaled, y_train, y_test = preprocessed_data
+    X_train, X_test, y_train, y_test = preprocess_combined_data(combined_data, target_variable="label")
 
-    print(f"X_train_scaled shape: {X_train_scaled.shape}, y_train shape: {y_train.shape}")
-    print(f"X_test_scaled shape: {X_test_scaled.shape}, y_test shape: {y_test.shape}")
+    print(f"X_train shape: {X_train.shape}, y_train shape: {y_train.shape}")
+    print(f"X_test shape: {X_test.shape}, y_test shape: {y_test.shape}")

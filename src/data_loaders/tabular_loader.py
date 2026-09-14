@@ -5,11 +5,6 @@ import os
 from tensorflow import keras
 from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import StandardScaler
-from sklearn.preprocessing._encoders import OrdinalEncoder, OneHotEncoder
-from sklearn.compose import ColumnTransformer
-from sklearn.impute import SimpleImputer
-from sklearn.linear_model import LassoCV
-from typing_extensions import Tuple, Optional 
 
 ## Data Directory
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))

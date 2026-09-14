@@ -90,11 +90,11 @@ class ImageFeatureExtractor(BaseEstimator):
 
 class EnsembleModelPipeline(BaseEstimator):
     ## Initializing the Model
-    def __init__(self, ensemble_model=None, image_extractor=None):
+    def __init__(self, ensemble_model=None, image_extractor=None, scaler=None):
         self.ensemble_model = self.base_estimators() if ensemble_model is None else ensemble_model
         # Use the provided extractor (e.g. loaded from disk with fitted PCA) or create a fresh one
         self.image_extractor = image_extractor if image_extractor is not None else ImageFeatureExtractor()
-        self.scaler = StandardScaler()
+        self.scaler = scaler if scaler is not None else StandardScaler()
         self.accuracy = None
         self.classification_report = None
         self.confusion_matrix = None
@@ -155,7 +155,11 @@ class EnsembleModelPipeline(BaseEstimator):
         ## Preprocessing the combined data
         X_train, X_test, y_train, y_test = preprocess_combined_data(combined_data, target_variable="label")
 
-        return X_train, X_test, y_train, y_test
+        ## Scaling the features
+        X_train_scaled = self.scaler.fit_transform(X_train)
+        X_test_scaled = self.scaler.transform(X_test)
+
+        return X_train_scaled, X_test_scaled, y_train, y_test
 
     ## Feature Extraction
     def _extracting_features(self, lat, lon, date):
@@ -175,7 +179,10 @@ class EnsembleModelPipeline(BaseEstimator):
         # Concatenate them side-by-side
         combined_features = pd.concat([df_image,df_topology, df_terrain], axis=1)
 
-        return combined_features
+        # Scale the combined features
+        combined_features_scaled = self.scaler.transform(combined_features)
+
+        return combined_features_scaled
 
     ## Fitting the Model
     def fit(self, X_train=None, y_train=None):
@@ -197,7 +204,7 @@ class EnsembleModelPipeline(BaseEstimator):
 
         classes = list(self.ensemble_model.classes_) 
 
-        # Probability of the not landslide class (not landslide = 0)
+        # Probability of the landslide class (landslide = 0, not landslide = 1)
         landslide_prob = proba[classes.index(0)] if 0 in classes else proba[1]
         landslide_chances = round(float(landslide_prob) * 100, 2)
 
@@ -206,6 +213,11 @@ class EnsembleModelPipeline(BaseEstimator):
     ## Prediction
     def predict(self, latitude:float, longitude:float, date:str):
         features = self._extracting_features(latitude, longitude, date)
+
+        # 2. Predict directly from the pre-processed training vector
+        print("Classes order:", self.ensemble_model.classes_)
+        print("Direct X_train proba:", self.ensemble_model.predict_proba(features))
+        print("Direct X_train pred:", self.ensemble_model.predict(features))
         result = self.ensemble_model.predict(features)
         return result
 
@@ -215,6 +227,7 @@ class EnsembleModelPipeline(BaseEstimator):
         artifacts = {
             "ensemble_model": self.ensemble_model,
             "pca": self.image_extractor.pca,
+            "scaler": self.scaler
         }
         export_path = BASE_PATH / filename
         joblib.dump(artifacts, export_path)
@@ -232,9 +245,12 @@ class EnsembleModelPipeline(BaseEstimator):
         artifacts = joblib.load(BASE_PATH / filename)
 
         extractor = ImageFeatureExtractor(pca=artifacts["pca"])
-        return cls(ensemble_model=artifacts["ensemble_model"], image_extractor=extractor)
+        return cls(ensemble_model=artifacts["ensemble_model"], image_extractor=extractor, scaler=artifacts["scaler"])
 
 if __name__ == "__main__":
+    #pipeline = EnsembleModelPipeline.load("ensemble_model_revised.joblib")
     pipeline = EnsembleModelPipeline()
     pipeline.fit()
+    prediction = pipeline.predict(24.780027,92.45372,"02-06-2020")
+    print(pipeline.predict_proba(24.780027,92.45372,"02-06-2020"))
     pipeline.export("ensemble_model_revised.joblib")
