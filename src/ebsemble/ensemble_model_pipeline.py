@@ -1,3 +1,4 @@
+from typing import Optional
 import joblib
 from sklearn.preprocessing import StandardScaler
 from sklearn.base import BaseEstimator
@@ -10,16 +11,18 @@ from ..fusion_models import encoding, join_embeddings_with_tabular_data, preproc
 # pyrefly: ignore [missing-import]
 from ..data_loaders import image_loader, load_landlisde_tabular_data, fetching_single_image, get_topology, get_terrain_features
 from sklearn.pipeline import Pipeline
-from sklearn.compose import ColumnTransformer
 from sklearn.neural_network import MLPClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.ensemble import RandomForestClassifier, VotingClassifier
 from sklearn.svm import SVC
+from sklearn.calibration import CalibratedClassifierCV
 from sklearn.decomposition import PCA
+from sklearn.model_selection import FixedThresholdClassifier
 import os
 from sklearn.metrics import accuracy_score, classification_report, confusion_matrix
 # pyrefly: ignore [missing-import]
 from tensorflow.keras.applications.resnet import ResNet50, preprocess_input
+from huggingface_hub import hf_hub_download,HfApi
 import tensorflow as tf
 
 # Model Path
@@ -28,7 +31,7 @@ BASE_PATH = PROJECT_ROOT / "models"
 
 CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 SAT_DATA_DIR = os.path.abspath(os.path.join(CURRENT_DIR, "..", "..", "data", "sat_data"))
-TABULAR_DATA_DIR = os.path.abspath(os.path.join(CURRENT_DIR, "..", "..", "data", "final_tabular_dataset.csv"))
+TABULAR_DATA_DIR = os.path.abspath(os.path.join(CURRENT_DIR, "..", "..", "data", "final_with_lat_lon.csv"))
 
 '''print(X_train.info())
 print(X_train.isnull().sum())
@@ -42,7 +45,7 @@ print("Test set shape:", X_test.shape)'''
 class ImageFeatureExtractor(BaseEstimator):
     def __init__(self,pca=None, model=None):
         self.model = ResNet50(weights='imagenet', include_top=False, pooling='avg', input_shape=(224, 224, 3))
-        self.pca = pca if pca is not None else PCA(n_components=256)
+        self.pca = pca if pca is not None else PCA(n_components=16)
 
     def _train_image_features(self):
         """
@@ -72,7 +75,7 @@ class ImageFeatureExtractor(BaseEstimator):
 
         if img_array is None:
             print("Warning: image fetch failed — returning zero embeddings.")
-            return np.zeros((1, 256))
+            return np.zeros((1, 16))
 
         # img_array is (224, 224, 3) numpy array — add batch dim and wrap in tf.data.Dataset
         img_tensor = tf.cast(img_array[np.newaxis, ...], tf.float32)  # shape: (1, 224, 224, 3)
@@ -90,7 +93,8 @@ class ImageFeatureExtractor(BaseEstimator):
 
 class EnsembleModelPipeline(BaseEstimator):
     ## Initializing the Model
-    def __init__(self, ensemble_model=None, image_extractor=None, scaler=None):
+    def __init__(self, ensemble_model=None, image_extractor=None, threshold = 0.4, scaler=None):
+        self.threshold = threshold
         self.ensemble_model = self.base_estimators() if ensemble_model is None else ensemble_model
         # Use the provided extractor (e.g. loaded from disk with fitted PCA) or create a fresh one
         self.image_extractor = image_extractor if image_extractor is not None else ImageFeatureExtractor()
@@ -104,7 +108,8 @@ class EnsembleModelPipeline(BaseEstimator):
         rf_model = RandomForestClassifier(
             n_estimators=500,
             criterion="entropy",
-            max_depth=10,
+            max_depth=8,
+            min_samples_leaf=4,
             class_weight="balanced",
             random_state=42,
             n_jobs=-1
@@ -114,9 +119,10 @@ class EnsembleModelPipeline(BaseEstimator):
             ("imputer", SimpleImputer(strategy="mean")),
             ("svm", SVC(
             kernel="rbf",
-            gamma="auto",
+            C=1.0,
+            gamma="scale",            
             class_weight="balanced",
-            probability=True,
+            probability=False,
             random_state=42
             ))
         ])
@@ -124,26 +130,42 @@ class EnsembleModelPipeline(BaseEstimator):
         ann_pipe = Pipeline([
             ("imputer", SimpleImputer(strategy="mean")),
             ("ann", MLPClassifier(
-                hidden_layer_sizes=(128, 64),
-                max_iter=500,
+                hidden_layer_sizes=(64, 32),
+                max_iter=1000,
                 activation="relu",
                 solver="adam",
-                random_state=42,
+                alpha=0.01,
+                early_stopping=True,
+                n_iter_no_change=15,
+                validation_fraction=0.15,
                 learning_rate_init=0.001,
+                random_state=42
             ))
         ])
 
+        #Calibrated model training
+        cal_rf = CalibratedClassifierCV(estimator=rf_model, method="sigmoid", cv=5)
+        cal_svm = CalibratedClassifierCV(estimator=svm_pipe, method="sigmoid", cv=5)
+        cal_ann = CalibratedClassifierCV(estimator=ann_pipe, method="sigmoid", cv=5)
+        
+
         ensemble_model = VotingClassifier(
             estimators=[
-                ('rf', rf_model),
-                ('svm', svm_pipe),
-                ('ann', ann_pipe),
+                ('rf', cal_rf),
+                ('svm', cal_svm),
+                ('ann', cal_ann),
             ],
             voting='soft',
-            weights=[1, 1, 1],
+            weights=[2, 1, 1],
         )
 
-        return ensemble_model
+        threshold_model = FixedThresholdClassifier(
+            estimator=ensemble_model,
+            threshold= self.threshold,
+            response_method="predict_proba"
+        )
+
+        return threshold_model
 
     ## Preprocessing the combined data
     def preprocess(self):
@@ -158,7 +180,7 @@ class EnsembleModelPipeline(BaseEstimator):
         ## Scaling the features
         X_train_scaled = self.scaler.fit_transform(X_train)
         X_test_scaled = self.scaler.transform(X_test)
-
+        print("X_train_scaled:", X_train_scaled.shape, "y_train:", y_train.shape, "X_test_scaled:", X_test_scaled.shape, "y_test:", y_test.shape)
         return X_train_scaled, X_test_scaled, y_train, y_test
 
     ## Feature Extraction
@@ -171,7 +193,7 @@ class EnsembleModelPipeline(BaseEstimator):
 
         df_image = pd.DataFrame(
             [image_embeddings_reduced.flatten()],
-            columns=[f"embedding_{i}" for i in range(256)],
+            columns=[f"embedding_{i}" for i in range(16)],
         )
         df_terrain = pd.DataFrame([terrain_features])
         df_topology = pd.DataFrame([topology_features])
@@ -204,8 +226,8 @@ class EnsembleModelPipeline(BaseEstimator):
 
         classes = list(self.ensemble_model.classes_) 
 
-        # Probability of the landslide class (landslide = 0, not landslide = 1)
-        landslide_prob = proba[classes.index(0)] if 0 in classes else proba[1]
+        # Probability of the landslide class (landslide = 1, not landslide = 0)
+        landslide_prob = proba[classes.index(1)] if 1 in classes else proba[0]
         landslide_chances = round(float(landslide_prob) * 100, 2)
 
         return landslide_chances
@@ -222,16 +244,33 @@ class EnsembleModelPipeline(BaseEstimator):
         return result
 
     ## Exporting the model
-    def export(self, filename="ensemble_artifacts.joblib"):
+    def export(self, filename="ensemble_artifactsV2.joblib",push_to_hub = False,repo_id: Optional[str] = None):
         """Saves VotingClassifier and fitted PCA together."""
         artifacts = {
             "ensemble_model": self.ensemble_model,
             "pca": self.image_extractor.pca,
-            "scaler": self.scaler
+            "scaler": self.scaler,
+            "threshold": self.threshold,
         }
         export_path = BASE_PATH / filename
         joblib.dump(artifacts, export_path)
         print(f"Artifacts successfully exported to: {export_path}")
+
+        # Push the model to Hugging Face Hub
+        if push_to_hub:
+            if not repo_id:
+                raise ValueError("`repo_id` is required when `push_to_hub=True`")
+
+            api = HfApi()
+            api.create_repo(repo_id=repo_id, repo_type="model", exist_ok=True)
+            api.upload_file(
+                path_or_fileobj=str(export_path),
+                path_in_repo=filename,
+                repo_id=repo_id,
+                repo_type="model",
+                commit_message=f"Upload bundle: ensemble, PCA, and scaler ({filename})",
+            )
+            print(f"Successfully published to Hugging Face Hub: {repo_id}/{filename}")
 
     ## Displaying the metrics
     def display_metrics(self):
@@ -240,17 +279,35 @@ class EnsembleModelPipeline(BaseEstimator):
         print("Confusion Matrix:\n", self.confusion_matrix)
 
     @classmethod
-    def load(cls, filename="landslide_model.joblib"):
+    def load(cls, filename: str = "landslide_model.joblib",repo_id: str | None = None,):
         """Loads artifacts and returns ready-to-use pipeline."""
-        artifacts = joblib.load(BASE_PATH / filename)
+        if repo_id:
+            # Fetches the artifact from Hugging Face and caches it locally
+            artifact_file = hf_hub_download(
+                repo_id=repo_id,
+                filename=filename,
+            )
+        else:
+            artifact_file = BASE_PATH / filename
+        
+        artifacts = joblib.load(artifact_file)
 
         extractor = ImageFeatureExtractor(pca=artifacts["pca"])
-        return cls(ensemble_model=artifacts["ensemble_model"], image_extractor=extractor, scaler=artifacts["scaler"])
+        return cls(ensemble_model=artifacts["ensemble_model"], image_extractor=extractor, scaler=artifacts["scaler"], threshold=artifacts["threshold"])
 
 if __name__ == "__main__":
     #pipeline = EnsembleModelPipeline.load("ensemble_model_revised.joblib")
-    pipeline = EnsembleModelPipeline()
+    '''pipeline = EnsembleModelPipeline()
     pipeline.fit()
-    prediction = pipeline.predict(24.780027,92.45372,"02-06-2020")
-    print(pipeline.predict_proba(24.780027,92.45372,"02-06-2020"))
-    pipeline.export("ensemble_model_revised.joblib")
+    pipeline.display_metrics()
+
+    pipeline.export(
+        filename="ensemble_artifactsV2.joblib",
+        push_to_hub=True,
+        repo_id="Nira00A/landslide-early-warning-ensemble",
+    )'''
+    '''prediction = pipeline.predict(24.780027,92.45372,"02-06-2020")
+    print(pipeline.predict_proba(24.780027,92.45372,"02-06-2020"))'''
+'''    pipeline.export("ensemble_model_revised2.joblib")'''
+
+    

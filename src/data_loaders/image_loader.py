@@ -7,8 +7,12 @@ from typing_extensions import Tuple
 from typing_extensions import Optional
 import os;
 from pystac_client import Client
+from pystac_client.stac_api_io import StacApiIO
 import planetary_computer as pc
 import numpy as np;
+import urllib3
+import requests
+from rasterio.windows import Window
 from tensorflow import keras;
 os.environ["TF_ENABLE_ONEDNN_OPTS"] = "0"
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
@@ -20,9 +24,15 @@ CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.abspath(os.path.join(CURRENT_DIR, "..", "..", "data", "sat_data"))
 
 # Image Boundary
-catalog = Client.open("https://planetarycomputer.microsoft.com/api/stac/v1")
+_CATALOG: Optional[Client] = None
 
-BOX_SIZE = 0.0048  # ~2.5 km box
+
+catalog = Client.open(
+    "https://planetarycomputer.microsoft.com/api/stac/v1",
+    modifier=pc.sign_inplace,
+)
+
+BOX_SIZE = 0.0048  
 
 # Image loader function to load the landslide images
 def image_loader(
@@ -53,6 +63,7 @@ def image_loader(
         "batch_size": batch_size,
         "image_size": image_size,
         "shuffle": False,
+        "seed": seed,
     }
 
     # Training Data
@@ -88,61 +99,105 @@ def load_landslide_numpy_data(
 
 # Fetching the image from the STAC catalog and for Single Point Data
 def fetching_single_image(lat: float, lon: float, date: str):
-    """
-    Fetches the image from the STAC catalog for the given latitude, longitude, and date.
-    """
-    dt = pd.to_datetime(date)
-    year = dt.year
-    start_date = dt - pd.Timedelta(days=7)
+    """Fetches a 3-channel Sentinel-1 SAR GRD patch using GCP mapping to bypass missing CRS."""
+    target_dt = pd.to_datetime(date)
+    end_date = target_dt.strftime("%Y-%m-%d")
+    start_date = (target_dt - pd.Timedelta(days=90)).strftime("%Y-%m-%d")
 
-    # Format as plain YYYY-MM-DD — STAC API rejects datetime strings with time components
-    start_date_str = start_date.strftime("%Y-%m-%d")
-    end_date_str = dt.strftime("%Y-%m-%d")
-
-    current_bbox = [lon - BOX_SIZE, lat - BOX_SIZE, lon + BOX_SIZE, lat + BOX_SIZE]
+    current_bbox = [
+        lon - BOX_SIZE,
+        lat - BOX_SIZE,
+        lon + BOX_SIZE,
+        lat + BOX_SIZE,
+    ]
 
     try:
-        # Sort by cloud cover over the 4-month dry window to grab the clearest scene (<5% cloud cover)
-        search = catalog.search(
-            collections=["sentinel-2-l2a"],
-            bbox=current_bbox,
-            datetime=f"{start_date_str}/{end_date_str}",
-            sortby=[{"field": "properties.eo:cloud_cover", "direction": "asc"}],
-            max_items=1
-        )
-        items = list(search.items())
-        
-        if not items:
-            fallback_start = f"{year - 1}-01-01"
-            fallback_end = f"{year - 1}-04-30"
-            search_fallback = catalog.search(
-                collections=["sentinel-2-l2a"],
-                bbox=current_bbox,
-                datetime=f"{fallback_start}/{fallback_end}",
-                sortby=[{"field": "properties.eo:cloud_cover", "direction": "asc"}],
-                max_items=1
-            )
-            items = list(search_fallback.items())
-        
+        # 1. Search with fallback window
+        stages = [
+            f"{start_date}/{end_date}",
+            "2019-01-01/2023-12-31",  # Baseline archive window
+            None,  # Any scene covering this bbox
+        ]
+
+        items = []
+        for stage in stages:
+            kwargs = {
+                "collections": ["sentinel-1-grd"],
+                "bbox": current_bbox,
+                "max_items": 1,
+            }
+            if stage:
+                kwargs["datetime"] = stage
+
+            search = catalog.search(**kwargs)
+            items = list(search.items())
+            if items:
+                break
+
         if not items:
             return None
 
+        # 2. Sign item
         item = pc.sign(items[0])
-        visual_url = item.assets["visual"].href
+        asset_key = next(
+            (
+                k
+                for k in ["vv", "VV", "vh", "VH"]
+                if k in item.assets
+            ),
+            list(item.assets.keys())[0],
+        )
 
-        # Reproject, stream, and crop 224x224 RGB image
-        with rasterio.open(visual_url) as src:
-            proj_bbox = transform_bounds("EPSG:4326", src.crs, *current_bbox)
-            window = from_bounds(*proj_bbox, transform=src.transform)
-            rgb = src.read([1, 2, 3], window=window, out_shape=(3, 224, 224), boundless=True)
-            rgb = np.moveaxis(rgb, 0, -1)
+        # 3. Read via GCP mapping (bypasses src.crs = None)
+        with rasterio.open(item.assets[asset_key].href) as src:
+            gcps, _ = src.gcps
+            if gcps:
+                gcp_lons = np.array([g.x for g in gcps])
+                gcp_lats = np.array([g.y for g in gcps])
+                A = np.column_stack(
+                    [
+                        np.ones(len(gcps)),
+                        gcp_lons,
+                        gcp_lats,
+                        gcp_lons * gcp_lats,
+                    ]
+                )
+                coeff_col, _, _, _ = np.linalg.lstsq(
+                    A, np.array([g.col for g in gcps]), rcond=None
+                )
+                coeff_row, _, _, _ = np.linalg.lstsq(
+                    A, np.array([g.row for g in gcps]), rcond=None
+                )
 
-        return rgb
+                pt = np.array([1.0, lon, lat, lon * lat])
+                center_col = int(np.dot(pt, coeff_col))
+                center_row = int(np.dot(pt, coeff_row))
+            else:
+                center_row, center_col = src.index(lon, lat)
+
+            HALF_PX = 50  # ~500m radius window
+            win = Window(
+                col_off=center_col - HALF_PX,
+                row_off=center_row - HALF_PX,
+                width=HALF_PX * 2,
+                height=HALF_PX * 2,
+            )
+            arr = src.read(1, window=win, out_shape=(224, 224), boundless=True)
+
+        # 4. Contrast stretch to 0-255 uint8
+        valid = arr[arr > 0]
+        vmin = np.percentile(valid, 2) if len(valid) > 0 else 0
+        vmax = np.percentile(valid, 98) if len(valid) > 0 else 1
+        norm = np.clip(
+            (arr - vmin) / (vmax - vmin + 1e-6) * 255.0, 0, 255
+        ).astype(np.uint8)
+
+        return np.stack([norm, norm, norm], axis=-1)
 
     except Exception as e:
-        print(f"Error fetching image: {e}")
+        print(f"Error fetching SAR image: {e}")
         return None
-
+        
 if __name__ == "__main__":
     X_train, y_train, X_test, y_test = load_landslide_numpy_data()
     # print

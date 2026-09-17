@@ -2,6 +2,7 @@
 .env/data/
 data
 data/*
+models
 
 # Satellite image data (large binary files — store separately)
 **/sat_data/
@@ -45,3 +46,9 @@ desktop.ini
 
 # Model binaries (optional — uncomment if you don't want to push .pkl files)
 # models/*.pkl
+
+.env
+*.env
+src/.env
+models/
+*.joblib

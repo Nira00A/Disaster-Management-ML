@@ -30,7 +30,7 @@ def encoding(dataDir: str):
 
     image_embeddings = base_model.predict(img_dataset)
 
-    pca = PCA(n_components=256) 
+    pca = PCA(n_components=16) 
 
     image_embeddings_reduced = pca.fit_transform(
         image_embeddings
@@ -49,7 +49,7 @@ def join_embeddings_with_tabular_data(image_embeddings, tabular_data):
     # Concatenate the image embeddings with the tabular data
     image_df = pd.DataFrame(
         image_embeddings,
-        columns=[f"embedding_{i}" for i in range(256)]
+        columns=[f"embedding_{i}" for i in range(16)]
     )
 
     combined_data = pd.concat(
